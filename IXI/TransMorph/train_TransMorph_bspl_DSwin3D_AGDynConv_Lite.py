@@ -8,6 +8,7 @@ import torch
 from torchvision import transforms
 import matplotlib.pyplot as plt
 from natsort import natsorted
+from tqdm import tqdm  # 引入 tqdm 进度条
 import models.transformation as transformation
 from models.TransMorph_bspl_DSwin3D_AGDynConv_Lite import CONFIGS as CONFIGS_TM
 from models.TransMorph_bspl_DSwin3D_AGDynConv_Lite import (
@@ -85,15 +86,21 @@ def main():
     best_dsc = 0
     writer = SummaryWriter(log_dir='logs/' + save_dir)
 
-    for epoch in range(epoch_start, max_epoch):
-        print('Training Starts')
+    # 外层 Epoch 进度条
+    epoch_pbar = tqdm(range(epoch_start, max_epoch), desc="Total Epochs", position=0)
+    
+    for epoch in epoch_pbar:
+        print(f'\n--- Epoch {epoch} Training Starts ---')
         loss_all = utils.AverageMeter()
         sim_all = utils.AverageMeter()
         flow_reg_all = utils.AverageMeter()
         off_mag_all = utils.AverageMeter()
         off_smooth_all = utils.AverageMeter()
         idx = 0
-        for data in train_loader:
+        
+        # 内层 Training 迭代进度条
+        train_pbar = tqdm(train_loader, desc=f"Epoch {epoch} [Train]", position=1, leave=False)
+        for data in train_pbar:
             idx += 1
             model.train()
             adjust_learning_rate(optimizer, epoch, max_epoch, lr)
@@ -118,28 +125,28 @@ def main():
             loss.backward()
             optimizer.step()
 
-            print(
-                'Iter {} of {} loss {:.4f}, Img Sim: {:.6f}, Flow Reg: {:.6f}, Off Mag: {:.6f}, Off Smooth: {:.6f}'.format(
-                    idx,
-                    len(train_loader),
-                    loss.item(),
-                    sim_loss.item(),
-                    flow_reg_loss.item(),
-                    off_mag_loss.item(),
-                    off_smooth_loss.item(),
-                )
-            )
+            # 将原本每次迭代的 print 替换为更新进度条后缀
+            train_pbar.set_postfix({
+                'loss': f'{loss.item():.4f}',
+                'sim': f'{sim_loss.item():.4f}',
+                'flow': f'{flow_reg_loss.item():.4f}',
+                'off_m': f'{off_mag_loss.item():.4f}',
+                'off_s': f'{off_smooth_loss.item():.4f}'
+            })
 
         writer.add_scalar('Loss/train', loss_all.avg, epoch)
         writer.add_scalar('Loss/sim', sim_all.avg, epoch)
         writer.add_scalar('Loss/flow_reg', flow_reg_all.avg, epoch)
         writer.add_scalar('Loss/offset_mag', off_mag_all.avg, epoch)
         writer.add_scalar('Loss/offset_smooth', off_smooth_all.avg, epoch)
-        print('Epoch {} loss {:.4f}'.format(epoch, loss_all.avg))
+        print('Epoch {} Average Train Loss {:.4f}'.format(epoch, loss_all.avg))
 
         eval_dsc = utils.AverageMeter()
+        
+        # 内层 Validation 迭代进度条
+        val_pbar = tqdm(val_loader, desc=f"Epoch {epoch} [Val]", position=1, leave=False)
         with torch.no_grad():
-            for data in val_loader:
+            for data in val_pbar:
                 model.eval()
                 data = [t.cuda() for t in data]
                 x = data[0]
@@ -153,7 +160,11 @@ def main():
                     def_grid = transformation.warp(grid_img.float(), disp.cuda(), interp_mode='bilinear')
                 dsc = utils.dice_val_VOI(def_out.long(), y_seg.long())
                 eval_dsc.update(dsc.item(), x.size(0))
-                print(eval_dsc.avg)
+                
+                # 更新验证阶段的进度条后缀
+                val_pbar.set_postfix({'DSC': f'{dsc.item():.4f}'})
+
+        print('Epoch {} Average Val DSC {:.4f}'.format(epoch, eval_dsc.avg))
 
         best_dsc = max(eval_dsc.avg, best_dsc)
         save_checkpoint(
@@ -181,6 +192,7 @@ def main():
         writer.add_figure('prediction', pred_fig, epoch)
         plt.close(pred_fig)
         loss_all.reset()
+        
     writer.close()
 
 
