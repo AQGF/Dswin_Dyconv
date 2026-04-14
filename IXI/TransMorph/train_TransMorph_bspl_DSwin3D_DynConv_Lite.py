@@ -8,6 +8,7 @@ import torch
 from torchvision import transforms
 import matplotlib.pyplot as plt
 from natsort import natsorted
+from tqdm import tqdm  # 引入 tqdm 进度条
 import models.transformation as transformation
 from models.TransMorph_bspl_DSwin3D_DynConv_Lite import CONFIGS as CONFIGS_TM
 import models.TransMorph_bspl_DSwin3D_DynConv_Lite as TransMorph_bspl_DSwinDynConvLite
@@ -33,10 +34,12 @@ def main():
     val_dir = 'Path_to_IXI_data/Val/'
     weights = [1, 1]
     save_dir = 'TransMorphBSpline_DSwin3D_DynConv_Lite_ncc_{}_diffusion_{}/'.format(weights[0], weights[1])
+    
     if not os.path.exists('experiments/' + save_dir):
         os.makedirs('experiments/' + save_dir)
     if not os.path.exists('logs/' + save_dir):
         os.makedirs('logs/' + save_dir)
+    
     sys.stdout = Logger('logs/' + save_dir)
     lr = 0.0001
     epoch_start = 0
@@ -76,11 +79,18 @@ def main():
     best_dsc = 0
     writer = SummaryWriter(log_dir='logs/' + save_dir)
 
-    for epoch in range(epoch_start, max_epoch):
-        print('Training Starts')
+    # 外层 Epoch 进度条
+    epoch_pbar = tqdm(range(epoch_start, max_epoch), desc="Total Epochs", position=0)
+
+    for epoch in epoch_pbar:
+        print(f'\n--- Epoch {epoch} Training Starts ---')
         loss_all = utils.AverageMeter()
         idx = 0
-        for data in train_loader:
+        
+        # 内层 Training 迭代进度条
+        train_pbar = tqdm(train_loader, desc=f"Epoch {epoch} [Train]", position=1, leave=False)
+        
+        for data in train_pbar:
             idx += 1
             model.train()
             adjust_learning_rate(optimizer, epoch, max_epoch, lr)
@@ -100,14 +110,24 @@ def main():
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
-            print('Iter {} of {} loss {:.4f}, Img Sim: {:.6f}, Reg: {:.6f}'.format(idx, len(train_loader), loss.item(), loss_vals[0].item(), loss_vals[1].item()))
+            
+            # 使用 set_postfix 动态显示各项 Loss，替代原来的 print
+            train_pbar.set_postfix({
+                'loss': f'{loss.item():.4f}',
+                'sim': f'{loss_vals[0].item():.4f}',
+                'reg': f'{loss_vals[1].item():.4f}'
+            })
 
         writer.add_scalar('Loss/train', loss_all.avg, epoch)
-        print('Epoch {} loss {:.4f}'.format(epoch, loss_all.avg))
+        print('Epoch {} Average Train Loss {:.4f}'.format(epoch, loss_all.avg))
 
         eval_dsc = utils.AverageMeter()
+        
+        # 内层 Validation 迭代进度条
+        val_pbar = tqdm(val_loader, desc=f"Epoch {epoch} [Val]", position=1, leave=False)
+        
         with torch.no_grad():
-            for data in val_loader:
+            for data in val_pbar:
                 model.eval()
                 data = [t.cuda() for t in data]
                 x = data[0]
@@ -121,7 +141,11 @@ def main():
                     def_grid = transformation.warp(grid_img.float(), output[2].cuda(), interp_mode='bilinear')
                 dsc = utils.dice_val_VOI(def_out.long(), y_seg.long())
                 eval_dsc.update(dsc.item(), x.size(0))
-                print(eval_dsc.avg)
+                
+                # 动态显示验证时的 DSC 分数
+                val_pbar.set_postfix({'DSC': f'{dsc.item():.4f}'})
+
+        print('Epoch {} Average Val DSC {:.4f}'.format(epoch, eval_dsc.avg))
 
         best_dsc = max(eval_dsc.avg, best_dsc)
         save_checkpoint(
@@ -149,6 +173,7 @@ def main():
         writer.add_figure('prediction', pred_fig, epoch)
         plt.close(pred_fig)
         loss_all.reset()
+        
     writer.close()
 
 
