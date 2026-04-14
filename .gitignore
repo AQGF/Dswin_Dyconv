@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.DS_Store
+*.pth
+*.pth.tar
+*.pt
+*.ckpt
+logs/
+experiments/
+Quantitative_Results/
+*.zip
