@@ -6,6 +6,7 @@ Minimal repository for IXI medical image registration experiments based on Trans
 - DSwin3D + Attention-Guided Dynamic Convolution variant
 - B-spline lightweight DSwin3D + DynConv variant
 - B-spline lightweight DSwin3D + Attention-Guided Dynamic Convolution variant
+- Expanded B-spline lightweight AGDynConv variant (`embed_dim=64`, `resize_channels=(24,24)`)
 
 ## Structure
 
@@ -13,6 +14,7 @@ Minimal repository for IXI medical image registration experiments based on Trans
 - `IXI/TransMorph/data`: IXI dataset and transform pipeline
 - `IXI/TransMorph/train_*.py`: training scripts
 - `IXI/TransMorph/infer_*.py`: inference scripts
+- `EXPERIMENT_ANALYSIS.md`: experiment results, comparisons, and debugging notes
 
 ## Notes
 
