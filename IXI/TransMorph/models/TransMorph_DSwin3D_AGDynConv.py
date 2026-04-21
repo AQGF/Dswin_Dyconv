@@ -195,7 +195,14 @@ class DeformableSlidingWindowAttentionGuided3D(nn.Module):
             weight = attn[:, :, rel_index].unsqueeze(2)
             out = out + weight * v_sample
 
-        return out
+        attn_safe = attn.clamp_min(1e-8)
+        attn_entropy = -(attn_safe * attn_safe.log()).sum(dim=2).mean(dim=(1, 2, 3, 4)).unsqueeze(1)
+        attn_peak = attn.max(dim=2).values.mean(dim=(1, 2, 3, 4)).unsqueeze(1)
+        branch_aux = {
+            'attn_branch_entropy': attn_entropy.detach(),
+            'attn_branch_peak': attn_peak.detach(),
+        }
+        return out, branch_aux
 
     def forward(self, x):
         batch_size, channels, depth, height, width = x.shape
@@ -232,6 +239,8 @@ class DeformableSlidingWindowAttentionGuided3D(nn.Module):
 
         branch_outputs = []
         branch_energies = []
+        branch_entropies = []
+        branch_peaks = []
         for q_branch, k_branch, v_branch, offset_branch, rel_offsets, bias in zip(
             q_splits,
             k_splits,
@@ -240,10 +249,12 @@ class DeformableSlidingWindowAttentionGuided3D(nn.Module):
             self.branch_offsets,
             self.branch_biases,
         ):
-            branch_out = self._branch_attention(q_branch, k_branch, v_branch, offset_branch, rel_offsets, bias)
+            branch_out, branch_aux = self._branch_attention(q_branch, k_branch, v_branch, offset_branch, rel_offsets, bias)
             branch_outputs.append(branch_out)
             branch_energy = branch_out.abs().mean(dim=(1, 2, 3, 4, 5), keepdim=False).unsqueeze(1)
             branch_energies.append(branch_energy)
+            branch_entropies.append(branch_aux['attn_branch_entropy'])
+            branch_peaks.append(branch_aux['attn_branch_peak'])
 
         out = torch.cat(branch_outputs, dim=1).reshape(batch_size, channels, depth, height, width)
 
@@ -256,7 +267,10 @@ class DeformableSlidingWindowAttentionGuided3D(nn.Module):
         aux = {
             'offsets': offsets,
             'offset_magnitude': offset_magnitude,
+            'offset_component_abs_mean': offsets.detach().abs().mean(dim=(1, 2, 3, 4)),
             'branch_energy': branch_energy,
+            'attn_branch_entropy': torch.cat(branch_entropies, dim=1),
+            'attn_branch_peak': torch.cat(branch_peaks, dim=1),
             'guide_vector': guide_vector,
         }
 
@@ -319,11 +333,19 @@ class AttentionGuidedDynamicRangeDWConv3D(nn.Module):
         weights = torch.softmax(self.gate(gate_input), dim=1)
 
         out = 0.0
+        branch_response = []
         for branch_index, branch in enumerate(self.branches):
             branch_out = branch(x)
+            branch_response.append(branch_out.detach().abs().mean(dim=(1, 2, 3, 4), keepdim=False).unsqueeze(1))
             alpha = weights[:, branch_index].view(-1, 1, 1, 1, 1)
             out = out + alpha * branch_out
-        return out
+        aux = {
+            'dynconv_gate_weights': weights.detach(),
+            'dynconv_branch_response': torch.cat(branch_response, dim=1),
+            'dynconv_feat_norm': feat_pool.detach().norm(dim=1, keepdim=True),
+            'dynconv_guidance_norm': guidance.detach().norm(dim=1, keepdim=True),
+        }
+        return out, aux
 
 
 class FeedForwardAttentionGuidedDynConv3D(nn.Module):
@@ -355,9 +377,11 @@ class FeedForwardAttentionGuidedDynConv3D(nn.Module):
 
     def forward(self, x, guidance):
         x = self.project_in(x)
-        x1, x2 = self.dynamic_dwconv(x, guidance).chunk(2, dim=1)
+        x, dynconv_aux = self.dynamic_dwconv(x, guidance)
+        x1, x2 = x.chunk(2, dim=1)
         x = F.gelu(x1) * x2
-        return self.project_out(x)
+        dynconv_aux['ffn_modulation_energy'] = x.detach().abs().mean(dim=(1, 2, 3, 4), keepdim=False).unsqueeze(1)
+        return self.project_out(x), dynconv_aux
 
 
 class DSwinTransformerBlockAGDynConv3D(nn.Module):
@@ -414,8 +438,11 @@ class DSwinTransformerBlockAGDynConv3D(nn.Module):
     def forward(self, x):
         attn_out, attn_aux = self.attn(self.norm1(x))
         x = x + self.drop_path(attn_out)
-        x = x + self.drop_path(self.ffn(self.norm2(x), attn_aux['guide_vector']))
-        return x, attn_aux
+        ffn_out, ffn_aux = self.ffn(self.norm2(x), attn_aux['guide_vector'])
+        x = x + self.drop_path(ffn_out)
+        block_aux = dict(attn_aux)
+        block_aux.update(ffn_aux)
+        return x, block_aux
 
 
 class DSwinStageAGDynConv3D(nn.Module):
