@@ -287,10 +287,15 @@ class NCC_vxm(torch.nn.Module):
         assert ndims in [1, 2, 3], "volumes should be 1 to 3 dimensions. found: %d" % ndims
 
         # set window size
-        win = [9] * ndims if self.win is None else self.win
+        if self.win is None:
+            win = [9] * ndims
+        elif isinstance(self.win, int):
+            win = [self.win] * ndims
+        else:
+            win = self.win
 
         # compute filters
-        sum_filt = torch.ones([1, 1, *win]).to("cuda")
+        sum_filt = torch.ones([1, 1, *win], dtype=Ii.dtype, device=Ii.device)
 
         pad_no = math.floor(win[0] / 2)
 
@@ -329,6 +334,39 @@ class NCC_vxm(torch.nn.Module):
         cc = cross * cross / (I_var * J_var + 1e-5)
 
         return -torch.mean(cc)
+
+
+class MultiScaleNCC_vxm(torch.nn.Module):
+    """
+    Multi-scale local normalized cross correlation loss.
+
+    Each scale computes the same VoxelMorph-style NCC as NCC_vxm with a
+    different local window size, then the losses are combined by weights.
+    """
+
+    def __init__(self, wins=(3, 9, 15), weights=None):
+        super(MultiScaleNCC_vxm, self).__init__()
+        if len(wins) == 0:
+            raise ValueError("wins must contain at least one window size")
+
+        self.wins = tuple(int(win) for win in wins)
+        if weights is None:
+            weights = [1.0 / len(self.wins)] * len(self.wins)
+        if len(weights) != len(self.wins):
+            raise ValueError("weights must have the same length as wins")
+
+        weight_sum = float(sum(weights))
+        if weight_sum <= 0:
+            raise ValueError("weights must sum to a positive value")
+        self.weights = tuple(float(weight) / weight_sum for weight in weights)
+        self.losses = torch.nn.ModuleList([NCC_vxm(win=win) for win in self.wins])
+
+    def forward(self, y_true, y_pred):
+        loss = 0.0
+        for weight, loss_fn in zip(self.weights, self.losses):
+            loss = loss + weight * loss_fn(y_true, y_pred)
+        return loss
+
 
 class MIND_loss(torch.nn.Module):
     """
